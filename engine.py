@@ -198,7 +198,7 @@ def _sheet(workbook, title: str):
     return next((ws for ws in workbook.worksheets if ws.title.strip() == normalized), None)
 
 
-def fill_template(template: Path, output: Path, course: Course, students: list[Student], maxima: tuple[list[float], list[float], list[float]], survey: list[dict[str, Any]], result: dict[str, Any], mapping: list[list[float]], target: float, direct_weights: tuple[float, float], overall_weights: tuple[float, float]) -> None:
+def fill_template(template: Path, output: Path, course: Course, students: list[Student], maxima: tuple[list[float], list[float], list[float]], survey: list[dict[str, Any]], result: dict[str, Any], mapping: list[list[float]], co_targets: dict[str,list[float]], po_targets: dict[str,list[float]], direct_weights: tuple[float, float], overall_weights: tuple[float, float]) -> None:
     shutil.copy2(template, output)
     wb = load_workbook(output)
     wb.calculation.fullCalcOnLoad = True
@@ -208,7 +208,10 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
 
     ws = _sheet(wb, "2. TARGET")
     for cell, value in {"E3":course.school,"N3":course.program,"P3":course.year,"B4":course.semester,"E4":course.code,"I4":course.name,"N4":course.faculty,"N5":course.course_type}.items(): ws[cell] = value
-    for i in range(4): ws.cell(18, 2+i, target); ws.cell(23, 2+i, target)
+    for i in range(4):
+        ws.cell(16,2+i,co_targets["previous"][i]); ws.cell(17,2+i,co_targets["attained"][i]); ws.cell(18,2+i,co_targets["current"][i])
+    for i in range(6):
+        ws.cell(21,2+i,po_targets["previous"][i]); ws.cell(22,2+i,po_targets["attained"][i]); ws.cell(23,2+i,po_targets["current"][i])
 
     ws = _sheet(wb, "3. CO-PO Mapping")
     ws["S4"], ws["S5"] = course.odd_even, course.section
@@ -273,7 +276,7 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     ws = _sheet(wb, "9.Direct & Overall CO attinment")
     ws["B14"],ws["B15"] = direct_weights; ws["C19"],ws["C20"] = overall_weights
     for c in range(4):
-        col=4+c; ws.cell(14,col,result["cie"][c]); ws.cell(15,col,result["see"][c]); ws.cell(16,col,result["direct"][c]); ws.cell(19,col,result["direct"][c]); ws.cell(20,col,result["indirect"][c] if survey else "NA"); ws.cell(21,col,result["overall"][c]); ws.cell(22,col,target); ws.cell(23,col,"YES" if result["overall"][c]>=target else "NO")
+        target=co_targets["current"][c]; col=4+c; ws.cell(14,col,result["cie"][c]); ws.cell(15,col,result["see"][c]); ws.cell(16,col,result["direct"][c]); ws.cell(19,col,result["direct"][c]); ws.cell(20,col,result["indirect"][c] if survey else "NA"); ws.cell(21,col,result["overall"][c]); ws.cell(22,col,target); ws.cell(23,col,"YES" if result["overall"][c]>=target else "NO")
 
     ws = _sheet(wb, "10. ACTION PLAN & RCA-CO")
     actions=["Use healthcare-agent examples and short diagnostic quizzes.","Use guided cases on algorithm selection and heuristic problem solving.","Reinforce MLOps, data-integration and deployment-validation case studies.","Use ethics, safety, human-in-the-loop discussions and a capstone presentation rubric."]
@@ -283,7 +286,7 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     ws = _sheet(wb, "11. PO ATTAINMENT")
     for c in range(4): ws.cell(9+c,1,result["direct"][c]); ws.cell(22+c,1,result["overall"][c])
     for p in range(6):
-        ws.cell(15,5+p,result["direct_po"][p]); ws.cell(16,5+p,target if result["direct_po"][p]>0 else "NA"); ws.cell(17,5+p,"YES" if result["direct_po"][p]>=target and result["direct_po"][p]>0 else "NA")
+        target=po_targets["current"][p]; ws.cell(15,5+p,result["direct_po"][p]); ws.cell(16,5+p,target if result["direct_po"][p]>0 else "NA"); ws.cell(17,5+p,"YES" if result["direct_po"][p]>=target and result["direct_po"][p]>0 else "NA")
         ws.cell(28,5+p,result["overall_po"][p]); ws.cell(29,5+p,target if result["overall_po"][p]>0 else "NA"); ws.cell(30,5+p,"YES" if result["overall_po"][p]>=target and result["overall_po"][p]>0 else "NA")
 
     ws = _sheet(wb, "12. ACTION PLAN & RCA-PO")
@@ -304,10 +307,17 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
     if len(registrations)!=len(set(registrations)): raise ValueError("Duplicate registration numbers were found in the marks file.")
     survey = parse_survey(files.get("survey"))
     if survey and len(survey) < len(students): warnings.append(f"Survey response rate is {len(survey)} of {len(students)} students.")
-    target=number(fields.get("target"),2.4); direct=(number(fields.get("cie_weight"),60),number(fields.get("see_weight"),40)); overall=(number(fields.get("direct_weight"),80),number(fields.get("indirect_weight"),20))
+    direct=(number(fields.get("cie_weight"),60),number(fields.get("see_weight"),40)); overall=(number(fields.get("direct_weight"),80),number(fields.get("indirect_weight"),20))
     if not math.isclose(sum(direct),100,abs_tol=0.01): raise ValueError("CIE and SEE weights must total 100%.")
     if not math.isclose(sum(overall),100,abs_tol=0.01): raise ValueError("Direct and indirect weights must total 100%.")
-    if not 0 <= target <= 3: raise ValueError("The attainment target must be between 0 and 3.")
+    def targets(field: str, count: int, default: float) -> dict[str,list[float]]:
+        raw=json.loads(fields.get(field) or "{}"); result={}
+        for key in ("previous","attained","current"):
+            values=raw.get(key,[default]*count)
+            if len(values)!=count or any(v is None or not 0<=number(v,-1)<=3 for v in values): raise ValueError(f"All {field.replace('_',' ')} values must be between 0 and 3.")
+            result[key]=[number(v) for v in values]
+        return result
+    co_targets=targets("co_targets",4,2.4); po_targets=targets("po_targets",6,2.0)
     mapping=json.loads(fields.get("mapping",json.dumps(DEFAULT_MAPPING)))
     if len(mapping)!=4 or any(len(row)!=6 for row in mapping) or any(number(v,-1)<0 or number(v,-1)>3 for row in mapping for v in row): raise ValueError("CO–PO mapping must be a 4 × 6 matrix with values from 0 to 3.")
     known=set(registrations)
@@ -316,8 +326,8 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
     for student in students:
         for label,marks,maxima in [("IA",student.ia,ia_max),("Mid-semester",student.mid,mid_max),("SEE",student.see,see_max)]:
             if any(mark<0 or mark>maxima[i] for i,mark in enumerate(marks)): raise ValueError(f"{label} marks for {student.reg} fall outside the permitted CO maximum marks.")
-    result=compute(students,ia_max,mid_max,see_max,survey,direct,overall,mapping,target)
+    result=compute(students,ia_max,mid_max,see_max,survey,direct,overall,mapping,0)
     output_dir.mkdir(parents=True,exist_ok=True); label=course.code.replace(' ','_') or 'Course'; name=f"{uuid.uuid4().hex[:10]}_CO_PO_Attainment_{label}.xlsx"; output=output_dir/name
-    fill_template(files["template"],output,course,students,(ia_max,mid_max,see_max),survey,result,mapping,target,direct,overall)
-    summary={"file":name,"students":len(students),"survey_responses":len(survey),"warnings":warnings,"cie":[round(x,3) for x in result["cie"]],"see":[round(x,3) for x in result["see"]],"direct":[round(x,3) for x in result["direct"]],"indirect":[round(x,3) for x in result["indirect"]] if survey else ["NA"]*4,"overall":[round(x,3) for x in result["overall"]],"po":[round(x,3) for x in result["overall_po"]],"target":target,"co_status":["YES" if x>=target else "NO" for x in result["overall"]]}
+    fill_template(files["template"],output,course,students,(ia_max,mid_max,see_max),survey,result,mapping,co_targets,po_targets,direct,overall)
+    summary={"file":name,"students":len(students),"survey_responses":len(survey),"warnings":warnings,"cie":[round(x,3) for x in result["cie"]],"see":[round(x,3) for x in result["see"]],"direct":[round(x,3) for x in result["direct"]],"indirect":[round(x,3) for x in result["indirect"]] if survey else ["NA"]*4,"overall":[round(x,3) for x in result["overall"]],"po":[round(x,3) for x in result["overall_po"]],"targets":co_targets["current"],"co_status":["YES" if x>=co_targets["current"][i] else "NO" for i,x in enumerate(result["overall"])]}
     return output,summary

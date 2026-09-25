@@ -82,7 +82,7 @@ class Handler(SimpleHTTPRequestHandler):
                     suffix=Path(item[0]).suffix.lower(); path=temp/(key+suffix); path.write_bytes(item[1]); files[key]=path
                 else: files[key]=None
             if not files['template'] or not files['marks']: return self._json(400,{'error':'Template and CO-wise marks files are required.'})
-            fields={key:form_fields.get(key,'') for key in ['course_code','course_name','faculty','school','program','semester','year','odd_even','section','course_type','target','cie_weight','see_weight','direct_weight','indirect_weight','mapping','co1','co2','co3','co4']}
+            fields={key:form_fields.get(key,'') for key in ['course_code','course_name','faculty','school','program','semester','year','odd_even','section','course_type','cie_weight','see_weight','direct_weight','indirect_weight','mapping','co_targets','po_targets','co1','co2','co3','co4']}
             output,summary=run_job(files,fields,JOBS)
             public_name=output.name.split('_',1)[1] if '_' in output.name else output.name; token=uuid.uuid4().hex
             with DOWNLOAD_LOCK: DOWNLOADS[token]={'path':output,'name':public_name,'expires':time.time()+DOWNLOAD_TTL}
