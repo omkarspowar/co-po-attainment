@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: co-po-attainment
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: COPO_HOST
+        value: 0.0.0.0
+      - key: COPO_NO_BROWSER
+        value: "1"
+    healthCheckPath: /api/health
