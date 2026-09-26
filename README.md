@@ -1,5 +1,7 @@
 # CO–PO Attainment Automation
 
+CO, PO and PSO columns are detected dynamically from the uploaded official template; they are not fixed in the webpage.
+
 A private local web application for completing the M.Tech theory CO–PO attainment template.
 
 ## Start on Windows

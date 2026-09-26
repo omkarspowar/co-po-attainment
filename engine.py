@@ -60,6 +60,24 @@ class Course:
 
 DEFAULT_MAPPING = [[2, 1, 3, 0, 0, 0], [3, 1, 3, 0, 0, 0], [3, 2, 3, 0, 0, 0], [3, 3, 3, 0, 0, 0]]
 
+OUTCOME_RE = re.compile(r"^(CO|PO|PSO)\s*[-_ ]?\s*(\d+)$", re.I)
+
+
+def inspect_template(path: Path) -> dict[str, list[str]]:
+    """Return the outcome labels actually provided by an uploaded template."""
+    wb = load_workbook(path, data_only=False, read_only=True)
+    found: dict[str, set[int]] = {"CO": set(), "PO": set(), "PSO": set()}
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                match = OUTCOME_RE.fullmatch(text(cell.value))
+                if match:
+                    found[match.group(1).upper()].add(int(match.group(2)))
+    labels = {"cos": [f"CO{i}" for i in sorted(found["CO"])], "outcomes": [f"PO{i}" for i in sorted(found["PO"])] + [f"PSO{i}" for i in sorted(found["PSO"])]}
+    if not labels["cos"] or not labels["outcomes"]:
+        raise ValueError("The uploaded template must contain CO and PO/PSO labels.")
+    return labels
+
 
 def parse_marks(path: Path) -> tuple[list[Student], list[float], list[float], list[float]]:
     sheets = read_xlsx(path)
@@ -186,7 +204,7 @@ def compute(students: list[Student], ia_max: list[float], mid_max: list[float], 
     overall = [((direct[i] * overall_weights[0] + indirect[i] * overall_weights[1]) / 100) if responses else direct[i] for i in range(4)]
     def po(co_values: list[float]) -> list[float]:
         result = []
-        for p in range(6):
+        for p in range(len(mapping[0]) if mapping else 0):
             denominator = sum(mapping[c][p] for c in range(4))
             result.append(sum(co_values[c] * mapping[c][p] for c in range(4)) / denominator if denominator else 0.0)
         return result
@@ -198,7 +216,16 @@ def _sheet(workbook, title: str):
     return next((ws for ws in workbook.worksheets if ws.title.strip() == normalized), None)
 
 
-def fill_template(template: Path, output: Path, course: Course, students: list[Student], maxima: tuple[list[float], list[float], list[float]], survey: list[dict[str, Any]], result: dict[str, Any], mapping: list[list[float]], co_targets: dict[str,list[float]], po_targets: dict[str,list[float]], direct_weights: tuple[float, float], overall_weights: tuple[float, float]) -> None:
+def _label_cells(ws, labels: list[str]) -> dict[str, list[Any]]:
+    result = {x.upper(): [] for x in labels}
+    for row in ws.iter_rows():
+        for cell in row:
+            key = text(cell.value).upper().replace(" ", "")
+            if key in result: result[key].append(cell)
+    return result
+
+
+def fill_template(template: Path, output: Path, course: Course, students: list[Student], maxima: tuple[list[float], list[float], list[float]], survey: list[dict[str, Any]], result: dict[str, Any], mapping: list[list[float]], co_targets: dict[str,list[float]], po_targets: dict[str,list[float]], direct_weights: tuple[float, float], overall_weights: tuple[float, float], co_labels: list[str], outcome_labels: list[str]) -> None:
     shutil.copy2(template, output)
     wb = load_workbook(output)
     wb.calculation.fullCalcOnLoad = True
@@ -208,16 +235,24 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
 
     ws = _sheet(wb, "2. TARGET")
     for cell, value in {"E3":course.school,"N3":course.program,"P3":course.year,"B4":course.semester,"E4":course.code,"I4":course.name,"N4":course.faculty,"N5":course.course_type}.items(): ws[cell] = value
-    for i in range(4):
-        ws.cell(16,2+i,co_targets["previous"][i]); ws.cell(17,2+i,co_targets["attained"][i]); ws.cell(18,2+i,co_targets["current"][i])
-    for i in range(6):
-        ws.cell(21,2+i,po_targets["previous"][i]); ws.cell(22,2+i,po_targets["attained"][i]); ws.cell(23,2+i,po_targets["current"][i])
+    target_cells = _label_cells(ws, co_labels + outcome_labels)
+    for i, label in enumerate(co_labels):
+        for header in target_cells.get(label, []):
+            if header.row <= 20:
+                ws.cell(header.row+1,header.column,co_targets["previous"][i]); ws.cell(header.row+2,header.column,co_targets["attained"][i]); ws.cell(header.row+3,header.column,co_targets["current"][i]); break
+    for i, label in enumerate(outcome_labels):
+        for header in target_cells.get(label, []):
+            if header.row >= 15:
+                ws.cell(header.row+1,header.column,po_targets["previous"][i]); ws.cell(header.row+2,header.column,po_targets["attained"][i]); ws.cell(header.row+3,header.column,po_targets["current"][i]); break
 
     ws = _sheet(wb, "3. CO-PO Mapping")
     ws["S4"], ws["S5"] = course.odd_even, course.section
+    map_headers = _label_cells(ws, outcome_labels)
     for i in range(4):
         ws.cell(13+i, 4, course.cos[i]); ws.cell(13+i, 21, course.bloom[i]); ws.cell(24+i, 1, f"CO{i+1}")
-        for p in range(6): ws.cell(24+i, 4+p, mapping[i][p])
+        for p,label in enumerate(outcome_labels):
+            headers=map_headers.get(label,[])
+            if headers: ws.cell(24+i, headers[0].column, mapping[i][p])
 
     ws = _sheet(wb, "4. CIE Assessment Marks")
     for row in range(14, 49):
@@ -285,9 +320,13 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
 
     ws = _sheet(wb, "11. PO ATTAINMENT")
     for c in range(4): ws.cell(9+c,1,result["direct"][c]); ws.cell(22+c,1,result["overall"][c])
-    for p in range(6):
-        target=po_targets["current"][p]; ws.cell(15,5+p,result["direct_po"][p]); ws.cell(16,5+p,target if result["direct_po"][p]>0 else "NA"); ws.cell(17,5+p,"YES" if result["direct_po"][p]>=target and result["direct_po"][p]>0 else "NA")
-        ws.cell(28,5+p,result["overall_po"][p]); ws.cell(29,5+p,target if result["overall_po"][p]>0 else "NA"); ws.cell(30,5+p,"YES" if result["overall_po"][p]>=target and result["overall_po"][p]>0 else "NA")
+    attainment_headers = _label_cells(ws, outcome_labels)
+    for p,label in enumerate(outcome_labels):
+        target=po_targets["current"][p]
+        for header in attainment_headers.get(label,[]):
+            if header.row not in (8,21): continue
+            value=result["direct_po"][p] if header.row==8 else result["overall_po"][p]; value_row=15 if header.row==8 else 28
+            ws.cell(value_row,header.column,value); ws.cell(value_row+1,header.column,target if value>0 else "NA"); ws.cell(value_row+2,header.column,"YES" if value>=target and value>0 else "NA")
 
     ws = _sheet(wb, "12. ACTION PLAN & RCA-PO")
     po_actions=["Continue clinical case investigations, evidence-based justification and capstone validation.","Strengthen technical reporting and presentation using structured rubrics.","Deepen specialization through advanced AI, MLOps and ethics integration."]
@@ -297,6 +336,11 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
 
 
 def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: Path) -> tuple[Path, dict[str, Any]]:
+    template_info=inspect_template(files["template"])
+    co_labels=json.loads(fields.get("co_labels") or "null") or template_info["cos"][:4]
+    outcome_labels=json.loads(fields.get("outcome_labels") or "null") or template_info["outcomes"]
+    if len(co_labels)!=4: raise ValueError("This marks format requires four active COs (CO1–CO4).")
+    if any(x not in template_info["cos"] for x in co_labels) or any(x not in template_info["outcomes"] for x in outcome_labels): raise ValueError("Outcome labels do not match the uploaded template. Please select the template again.")
     course = Course(code=fields.get("course_code", ""), name=fields.get("course_name", ""), faculty=fields.get("faculty", ""), school=fields.get("school", "") or Course.school, program=fields.get("program", "") or Course.program, semester=fields.get("semester", "II"), year=fields.get("year", ""), odd_even=fields.get("odd_even", "Even"), section=fields.get("section", "Medical Informatics"), course_type=fields.get("course_type", "Core"))
     course = parse_course_plan(files.get("course_plan"), course)
     for i in range(4):
@@ -317,9 +361,9 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
             if len(values)!=count or any(v is None or not 0<=number(v,-1)<=3 for v in values): raise ValueError(f"All {field.replace('_',' ')} values must be between 0 and 3.")
             result[key]=[number(v) for v in values]
         return result
-    co_targets=targets("co_targets",4,2.4); po_targets=targets("po_targets",6,2.0)
+    co_targets=targets("co_targets",len(co_labels),2.4); po_targets=targets("po_targets",len(outcome_labels),2.0)
     mapping=json.loads(fields.get("mapping",json.dumps(DEFAULT_MAPPING)))
-    if len(mapping)!=4 or any(len(row)!=6 for row in mapping) or any(number(v,-1)<0 or number(v,-1)>3 for row in mapping for v in row): raise ValueError("CO–PO mapping must be a 4 × 6 matrix with values from 0 to 3.")
+    if len(mapping)!=len(co_labels) or any(len(row)!=len(outcome_labels) for row in mapping) or any(number(v,-1)<0 or number(v,-1)>3 for row in mapping for v in row): raise ValueError(f"CO–PO/PSO mapping must be a {len(co_labels)} × {len(outcome_labels)} matrix with values from 0 to 3.")
     known=set(registrations)
     unmatched=[x["reg"] for x in survey if x["reg"] not in known]
     if unmatched: warnings.append("Survey registration numbers not found in marks: "+", ".join(unmatched))
@@ -328,6 +372,6 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
             if any(mark<0 or mark>maxima[i] for i,mark in enumerate(marks)): raise ValueError(f"{label} marks for {student.reg} fall outside the permitted CO maximum marks.")
     result=compute(students,ia_max,mid_max,see_max,survey,direct,overall,mapping,0)
     output_dir.mkdir(parents=True,exist_ok=True); label=course.code.replace(' ','_') or 'Course'; name=f"{uuid.uuid4().hex[:10]}_CO_PO_Attainment_{label}.xlsx"; output=output_dir/name
-    fill_template(files["template"],output,course,students,(ia_max,mid_max,see_max),survey,result,mapping,co_targets,po_targets,direct,overall)
+    fill_template(files["template"],output,course,students,(ia_max,mid_max,see_max),survey,result,mapping,co_targets,po_targets,direct,overall,co_labels,outcome_labels)
     summary={"file":name,"students":len(students),"survey_responses":len(survey),"warnings":warnings,"cie":[round(x,3) for x in result["cie"]],"see":[round(x,3) for x in result["see"]],"direct":[round(x,3) for x in result["direct"]],"indirect":[round(x,3) for x in result["indirect"]] if survey else ["NA"]*4,"overall":[round(x,3) for x in result["overall"]],"po":[round(x,3) for x in result["overall_po"]],"targets":co_targets["current"],"co_status":["YES" if x>=co_targets["current"][i] else "NO" for i,x in enumerate(result["overall"])]}
     return output,summary
