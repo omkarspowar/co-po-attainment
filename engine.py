@@ -225,7 +225,32 @@ def parse_course_plan(path: Path | None, fallback: Course) -> Course:
 def inspect_course_plan(path: Path) -> dict[str, Any]:
     blank = Course(school="", program="", semester="", odd_even="", section="", course_type="", bloom=["", "", "", ""])
     course = parse_course_plan(path, blank)
-    return {"course_code": course.code, "course_name": course.name, "faculty":course.faculty, "school": course.school, "program": course.program, "semester": course.semester, "year": course.year, "course_type": course.course_type, "cos": course.cos, "bloom": course.bloom}
+    articulation: dict[str,dict[str,float]]={};mapping_outcomes=[];warnings=[]
+    if path.suffix.lower()==".docx":
+        doc=Document(path)
+        for table in doc.tables:
+            rows=[[text(c.text) for c in row.cells] for row in table.rows]
+            if not rows: continue
+            header_i=next((i for i,row in enumerate(rows) if sum(bool(OUTCOME_RE.fullmatch(x)) and not x.upper().startswith("CO") for x in row)>=2),None)
+            if header_i is None: continue
+            headers=[]
+            for column,value in enumerate(rows[header_i]):
+                match=OUTCOME_RE.fullmatch(value)
+                if match and match.group(1).upper() in {"PO","PSO"}: headers.append((column,f"{match.group(1).upper()}{int(match.group(2))}"))
+            for row in rows[header_i+1:]:
+                co_match=next((re.fullmatch(r"\s*CO\s*(\d+)\s*",value,re.I) for value in row if re.fullmatch(r"\s*CO\s*(\d+)\s*",value,re.I)),None)
+                if not co_match: continue
+                label=f"CO{int(co_match.group(1))}";values={}
+                for column,outcome in headers:
+                    raw=row[column] if column<len(row) else ""
+                    if raw!="" and 0<=number(raw,-1)<=3: values[outcome]=number(raw)
+                articulation[label]=values
+            mapping_outcomes=[label for _,label in headers]
+            if articulation: break
+    active=[f"CO{i+1}" for i,value in enumerate(course.cos) if value]
+    missing=[co for co in active if co not in articulation]
+    if missing: warnings.append("No articulation-matrix row was found for "+", ".join(missing)+"; those mappings remain blank for faculty review.")
+    return {"course_code": course.code, "course_name": course.name, "faculty":course.faculty, "school": course.school, "program": course.program, "semester": course.semester, "year": course.year, "course_type": course.course_type, "cos": course.cos, "bloom": course.bloom,"mapping":articulation,"mapping_outcomes":mapping_outcomes,"warnings":warnings}
 
 
 def parse_survey(path: Path | None, co_count: int=4) -> list[dict[str, Any]]:

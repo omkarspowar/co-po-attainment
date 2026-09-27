@@ -1,3 +1,3 @@
-5.5.0-upload-status-and-interface-refresh
+6.0.0-faculty-product-interface
 
-This release adds red/green per-file upload indicators, clearer four-step navigation, OSP Academic Quality Automation branding, and a responsive interface refresh while retaining the verified attainment workflow.
+This release introduces the commercial-ready OSP Academic Quality product interface with guided faculty onboarding, clear upload routes, live workflow navigation, accessible states, polished validation and download experiences, and responsive tables.

@@ -2,6 +2,12 @@
 
 The interface is branded as **OSP Academic Quality Automation**. Every upload card shows a red status light before file selection and a green status light after selection, with a responsive four-step workflow for upload, review, configuration and generation.
 
+Version 6.0 presents a product-ready faculty experience with a guided landing area, standard/prepared upload routes, clear required and optional file labels, automatic workflow navigation, review checkpoints, responsive sticky-header tables, generation progress and a structured success/download screen.
+
+Interface refreshes are idempotent: uploading the template, course plan or QP repeatedly rebuilds each target/mapping table once and preserves compatible values already entered by the faculty.
+
+When the course plan contains a CO–PO/PSO articulation matrix, supported mapping values are loaded automatically into the interface. Missing CO rows remain blank for faculty review, and extra outcomes that do not exist in the uploaded official template are reported and ignored.
+
 CO, PO and PSO columns are detected dynamically from the uploaded official template; they are not fixed in the webpage.
 
 Outcome detection is restricted to the official target table so labels appearing elsewhere in formulas or unused sheets are not mistakenly added. CO slots without target data remain inactive until confirmed by the QP Analysis or course plan. Unmapped CO–PO/PSO cells are displayed as blank; blank is interpreted internally as mapping value zero.
