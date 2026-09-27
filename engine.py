@@ -65,8 +65,28 @@ OUTCOME_RE = re.compile(r"^(CO|PO|PSO)\s*[-_ ]?\s*(\d+)$", re.I)
 
 
 def inspect_template(path: Path) -> dict[str, list[str]]:
-    """Return the outcome labels actually provided by an uploaded template."""
+    """Return active COs and defined PO/PSO labels from the official TARGET sheet."""
     wb = load_workbook(path, data_only=False, read_only=True)
+    target_ws=next((ws for ws in wb.worksheets if "TARGET" in ws.title.upper()),None)
+    if target_ws:
+        co_labels=[];active_co_labels=[];outcome_labels=[]
+        for row in target_ws.iter_rows():
+            first=text(row[0].value).upper().replace(" ","") if row else ""
+            if first=="CO":
+                candidates=[]
+                for cell in row[1:]:
+                    match=OUTCOME_RE.fullmatch(text(cell.value))
+                    if match and match.group(1).upper()=="CO": candidates.append((cell.column,f"CO{int(match.group(2))}"))
+                active=[]
+                for col,label in candidates:
+                    if any(text(target_ws.cell(row[0].row+offset,col).value) for offset in (1,2,3)): active.append(label)
+                co_labels=[label for _,label in candidates];active_co_labels=active
+            if first in {"PO&PSO","PO/PSO","POPSO"}:
+                for cell in row[1:]:
+                    match=OUTCOME_RE.fullmatch(text(cell.value))
+                    if match and match.group(1).upper() in {"PO","PSO"}: outcome_labels.append(f"{match.group(1).upper()}{int(match.group(2))}")
+        if co_labels and outcome_labels: return {"cos":co_labels,"active_cos":active_co_labels,"outcomes":outcome_labels}
+    # Fallback for older templates without a recognizable target sheet.
     found: dict[str, set[int]] = {"CO": set(), "PO": set(), "PSO": set()}
     for ws in wb.worksheets:
         for row in ws.iter_rows():
@@ -77,6 +97,7 @@ def inspect_template(path: Path) -> dict[str, list[str]]:
     labels = {"cos": [f"CO{i}" for i in sorted(found["CO"])], "outcomes": [f"PO{i}" for i in sorted(found["PO"])] + [f"PSO{i}" for i in sorted(found["PSO"])]}
     if not labels["cos"] or not labels["outcomes"]:
         raise ValueError("The uploaded template must contain CO and PO/PSO labels.")
+    labels["active_cos"]=labels["cos"]
     return labels
 
 
@@ -107,25 +128,37 @@ def apply_grades(path: Path | None, students: list[Student], course_code: str) -
     if not path:
         warnings.append("Grade file was not supplied; grade cells will remain blank.")
         return warnings
-    rows = first_nonempty_sheet(path)
-    if not rows:
-        return ["Grade file was empty or unreadable."]
-    header = [text(x).lower() for x in rows[0]]
-    def locate(fragment: str, fallback: int) -> int:
-        return next((i for i, item in enumerate(header) if fragment in item), fallback)
-    code_i, name_i = locate("course code", 2), locate("participant account: name", 3)
-    reg_i, grade_i = locate("enrollment id", 4), locate("grade", 10)
+    selected=None
+    for sheet_name,rows in read_xlsx(path).items():
+        for header_i,row in enumerate(rows[:20]):
+            header=[text(x).lower() for x in row]
+            reg_i=next((i for i,x in enumerate(header) if any(k in re.sub(r"[^a-z]","",x) for k in ("regnumber","registrationnumber","enrollmentid","orgdefinedid","rollnum"))),None)
+            grade_i=next((i for i,x in enumerate(header) if x.strip() in {"grade","see grade","final grade","letter grade"}),None)
+            if reg_i is not None and grade_i is not None:
+                selected=(sheet_name,rows,header_i,header,reg_i,grade_i);break
+        if selected: break
+    if not selected:
+        return ["Could not find a worksheet containing both registration numbers and a final-grade column."]
+    sheet_name,rows,header_i,header,reg_i,grade_i=selected
+    name_i=next((i for i,x in enumerate(header) if x in {"name","student name","participant account: name","first name"}),None)
+    code_i=next((i for i,x in enumerate(header) if "course code" in x),None)
     by_reg: dict[str, tuple[str, str]] = {}
-    for row in rows[1:]:
-        padded = list(row) + [None] * (max(code_i, name_i, reg_i, grade_i) + 1 - len(row))
-        if course_code and text(padded[code_i]).replace(" ", "").lower() != course_code.replace(" ", "").lower():
+    duplicates=[]
+    required=[reg_i,grade_i]+([name_i] if name_i is not None else [])+([code_i] if code_i is not None else [])
+    for row in rows[header_i+1:]:
+        padded = list(row) + [None] * (max(required) + 1 - len(row))
+        if code_i is not None and course_code and text(padded[code_i]).replace(" ", "").lower() != course_code.replace(" ", "").lower():
             continue
         reg = canonical_reg(padded[reg_i])
         if reg:
-            by_reg[reg] = (text(padded[name_i]), text(padded[grade_i]))
+            if reg in by_reg: duplicates.append(reg)
+            by_reg[reg] = (text(padded[name_i]) if name_i is not None else "", text(padded[grade_i]))
+    if duplicates: warnings.append(f"Duplicate grade rows found for: {', '.join(sorted(set(duplicates)))}.")
+    blank=[reg for reg,(name,grade) in by_reg.items() if not grade]
+    if blank: warnings.append(f"Blank final grades found for: {', '.join(blank)}.")
     for student in students:
         if student.reg in by_reg:
-            student.name = by_reg[student.reg][0].title()
+            if by_reg[student.reg][0]: student.name = by_reg[student.reg][0].title()
             student.grade = by_reg[student.reg][1]
         else:
             warnings.append(f"No grade matched registration number {student.reg}.")
@@ -161,13 +194,38 @@ def parse_course_plan(path: Path | None, fallback: Course) -> Course:
     for co in range(1, len(fallback.cos)+1):
         bloom_match = re.search(rf"\bCO\s*{co}\b[^\n|]*?\bL\s*([1-6])\b", content, flags=re.I)
         if bloom_match: fallback.bloom[co-1] = f"L{bloom_match.group(1)}"
+    # Institutional table format: CO/CLO | Statements | ... | BL.
+    for table in doc.tables:
+        rows=[[text(c.text) for c in row.cells] for row in table.rows]
+        if not rows: continue
+        headers=[re.sub(r"\s+"," ",x).strip().lower() for x in rows[0]]
+        co_i=next((i for i,x in enumerate(headers) if "co/clo" in x or x in {"co","clo"}),None)
+        statement_i=next((i for i,x in enumerate(headers) if "statement" in x),None)
+        bloom_i=next((i for i,x in enumerate(headers) if x.startswith("bl") or "bloom" in x),None)
+        if co_i is not None and statement_i is not None:
+            for row in rows[1:]:
+                if max(co_i,statement_i)>=len(row): continue
+                match=re.search(r"(?:CO\s*)?(\d+)",row[co_i],re.I)
+                if not match: continue
+                position=int(match.group(1))-1
+                if position<len(fallback.cos) and row[statement_i]: fallback.cos[position]=row[statement_i]
+                if bloom_i is not None and bloom_i<len(row) and row[bloom_i]: fallback.bloom[position]=re.sub(r"\s+"," ",row[bloom_i].replace("/"," ")).strip()
+        # Label/value metadata table.
+        for row in rows:
+            for i,value in enumerate(row[:-1]):
+                key=re.sub(r"[^a-z]","",value.lower())
+                candidate=row[i+1].strip()
+                if not candidate: continue
+                if key=="schoolname" and not fallback.school: fallback.school=candidate
+                elif key in {"nameofthefaculty","facultyname"} and not fallback.faculty: fallback.faculty=candidate
+                elif key in {"corepeoe","coursetype"} and not fallback.course_type: fallback.course_type=candidate
     return fallback
 
 
 def inspect_course_plan(path: Path) -> dict[str, Any]:
     blank = Course(school="", program="", semester="", odd_even="", section="", course_type="", bloom=["", "", "", ""])
     course = parse_course_plan(path, blank)
-    return {"course_code": course.code, "course_name": course.name, "school": course.school, "program": course.program, "semester": course.semester, "year": course.year, "course_type": course.course_type, "cos": course.cos, "bloom": course.bloom}
+    return {"course_code": course.code, "course_name": course.name, "faculty":course.faculty, "school": course.school, "program": course.program, "semester": course.semester, "year": course.year, "course_type": course.course_type, "cos": course.cos, "bloom": course.bloom}
 
 
 def parse_survey(path: Path | None, co_count: int=4) -> list[dict[str, Any]]:
@@ -183,7 +241,9 @@ def parse_survey(path: Path | None, co_count: int=4) -> list[dict[str, Any]]:
     for co in range(1, co_count+1):
         pattern = re.compile(rf"\bco\s*{co}\b")
         co_indices.append(next((i for i, x in enumerate(header) if pattern.search(x)), 7 + co))
-    responses = []
+    # Keep the latest response for each registration number so duplicate form
+    # submissions never give one student extra weight in indirect attainment.
+    responses_by_reg: dict[str, dict[str, Any]] = {}
     for row in rows[1:]:
         padded = list(row) + [None] * (max([name_i, reg_i] + co_indices) + 1 - len(row))
         reg = canonical_reg(padded[reg_i])
@@ -191,8 +251,8 @@ def parse_survey(path: Path | None, co_count: int=4) -> list[dict[str, Any]]:
             continue
         ratings = [number(padded[i]) for i in co_indices]
         if any(ratings):
-            responses.append({"name": text(padded[name_i]), "reg": reg, "ratings": ratings})
-    return responses
+            responses_by_reg[reg]={"name": text(padded[name_i]), "reg": reg, "ratings": ratings}
+    return list(responses_by_reg.values())
 
 
 def attainment(mark: float, maximum: float, grade: str) -> int:
@@ -231,8 +291,14 @@ def compute(students: list[Student], ia_max: list[float], mid_max: list[float], 
 
 
 def _sheet(workbook, title: str):
-    normalized = title.strip()
-    return next((ws for ws in workbook.worksheets if ws.title.strip() == normalized), None)
+    normalized=re.sub(r"[^A-Z0-9]","",title.upper())
+    exact=next((ws for ws in workbook.worksheets if re.sub(r"[^A-Z0-9]","",ws.title.upper())==normalized),None)
+    if exact: return exact
+    number=re.match(r"\s*(\d+)\s*\.",title)
+    if number:
+        prefix=number.group(1)+"."
+        return next((ws for ws in workbook.worksheets if ws.title.strip().startswith(prefix)),None)
+    return None
 
 
 def _label_cells(ws, labels: list[str]) -> dict[str, list[Any]]:
@@ -252,7 +318,7 @@ def _co_analysis(i: int, course: Course, result: dict[str, Any], target: float) 
     weak_name,weak_value=min(components.items(),key=lambda x:x[1])
     if overall>=target:
         rca=f"{label} attained the target ({overall:.2f} against {target:.2f}). The comparatively lowest evidence was from the {weak_name} ({weak_value:.2f}); this is a monitoring point rather than a current attainment failure."
-        action=f"Continue the teaching and assessment practices used for “{statement}”. Retain activities at {bloom}, review question-level performance in the {weak_name}, and monitor the same indicator in the next cycle to prevent regression."
+        action=""
     else:
         gap=target-overall
         rca=f"{label} did not attain the target: overall attainment {overall:.2f}, target {target:.2f}, gap {gap:.2f}. The weakest evidence was the {weak_name} ({weak_value:.2f}); direct attainment was {direct:.2f}"+(f" and indirect attainment was {indirect:.2f}." if indirect>0 else ".")+f" This indicates insufficient achievement of “{statement}”, particularly at {bloom}."
@@ -265,9 +331,9 @@ def _co_analysis(i: int, course: Course, result: dict[str, Any], target: float) 
 
 def _po_analysis(label: str, value: float, target: float | None, contributors: list[str]) -> tuple[str,str]:
     source=", ".join(contributors) if contributors else "no mapped CO"
-    if value<=0 or target is None: return (f"{label} is not mapped to an active CO in this course; attainment analysis is not applicable.","No corrective action is required unless the CO–PO/PSO mapping is revised.")
+    if value<=0 or target is None: return (f"{label} is not mapped to an active CO in this course; attainment analysis is not applicable.","")
     if value>=target:
-        return (f"{label} attained the target ({value:.2f} against {target:.2f}) through contributions from {source}.",f"Continue the learning activities, assessment evidence and rubrics used for {source}; monitor {label} in the next cycle.")
+        return (f"{label} attained the target ({value:.2f} against {target:.2f}) through contributions from {source}.","")
     gap=target-value
     return (f"{label} did not attain the target: attainment {value:.2f}, target {target:.2f}, gap {gap:.2f}. The result is driven by the mapped outcomes {source}.",f"Strengthen the learning activities and assessment rubrics of {source}, include explicit evidence for {label}, and verify improvement in the next cycle against the present {gap:.2f} gap.")
 
@@ -281,7 +347,7 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     ia_max, mid_max, see_max = maxima
 
     ws = _sheet(wb, "2. TARGET")
-    for cell, value in {"E3":course.school,"N3":course.program,"P3":course.year,"B4":course.semester,"E4":course.code,"I4":course.name,"N4":course.faculty,"N5":course.course_type}.items(): ws[cell] = value
+    for cell, value in {"E3":course.school,"M3":course.program,"N3":course.year,"B4":course.semester,"E4":course.code,"I4":course.name,"M4":course.faculty,"M5":course.course_type}.items(): ws[cell] = value
     target_cells = _label_cells(ws, co_labels + outcome_labels)
     for i, label in enumerate(co_labels):
         for header in target_cells.get(label, []):
@@ -293,13 +359,16 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
                 ws.cell(header.row+1,header.column,po_targets["previous"][i]); ws.cell(header.row+2,header.column,po_targets["attained"][i]); ws.cell(header.row+3,header.column,po_targets["current"][i]); break
 
     ws = _sheet(wb, "3. CO-PO Mapping")
-    ws["S4"], ws["S5"] = course.odd_even, course.section
-    map_headers = _label_cells(ws, outcome_labels)
-    for i in range(4):
-        ws.cell(13+i, 4, course.cos[i]); ws.cell(13+i, 21, course.bloom[i]); ws.cell(24+i, 1, f"CO{i+1}")
+    ws["Q4"], ws["Q5"] = course.odd_even, course.section
+    map_headers = {label:[] for label in outcome_labels}
+    for cell in ws[31]:
+        key=text(cell.value).upper().replace(" ","")
+        if key in map_headers: map_headers[key].append(cell)
+    for i in range(len(co_labels)):
+        ws.cell(13+i, 4, course.cos[i]); ws.cell(13+i, 17, course.bloom[i]); ws.cell(32+i, 1, f"{course.code}.{i+1}" if course.code else f"CO{i+1}")
         for p,label in enumerate(outcome_labels):
             headers=map_headers.get(label,[])
-            if headers: ws.cell(24+i, headers[0].column, mapping[i][p])
+            if headers: ws.cell(32+i, headers[0].column, mapping[i][p] or None)
 
     ws = _sheet(wb, "4. CIE Assessment Marks")
     for row in range(14, 49):
@@ -342,10 +411,11 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     ws["C57"] = len(students)
 
     ws = _sheet(wb, "8. Course Feedback")
-    for c in range(4): ws.cell(23,5+c,course.cos[c])
-    for row in range(25,60):
+    for c in range(len(co_labels)): ws.cell(24,5+c,course.cos[c])
+    for row in range(26,60):
         for col in range(2,15): ws.cell(row,col,None)
-    for r,response in enumerate(survey,start=25):
+    for r,response in enumerate(survey,start=26):
+        ws.cell(r,1,r-25)
         ws.cell(r,2,response["name"]); ws.cell(r,3,response["reg"])
         for c,rating in enumerate(response["ratings"]):
             ws.cell(r,5+c,rating); ws.cell(r,11+c,3 if rating==5 else 2 if rating>=3 else 1)
@@ -358,13 +428,13 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     ws = _sheet(wb, "9.Direct & Overall CO attinment")
     ws["B14"],ws["B15"] = direct_weights; ws["C19"],ws["C20"] = overall_weights
     for c in range(4):
-        target=co_targets["current"][c]; col=4+c; ws.cell(14,col,result["cie"][c]); ws.cell(15,col,result["see"][c]); ws.cell(16,col,result["direct"][c]); ws.cell(19,col,result["direct"][c]); ws.cell(20,col,result["indirect"][c] if survey else "NA"); ws.cell(21,col,result["overall"][c]); ws.cell(22,col,target); ws.cell(23,col,"YES" if result["overall"][c]>=target else "NO")
+        target=co_targets["current"][c]; col=4+c; ws.cell(14,col,result["cie"][c]); ws.cell(15,col,result["see"][c]); ws.cell(16,col,result["direct"][c]); ws.cell(19,col,result["direct"][c]); ws.cell(20,col,result["indirect"][c] if survey else "NA"); ws.cell(21,col,result["overall"][c]); ws.cell(22,col,target); ws.cell(23,col,"Y" if result["overall"][c]>=target else "N")
 
     ws = _sheet(wb, "10. ACTION PLAN & RCA-CO")
     co_rca=[]
     for i,target in enumerate(co_targets["current"]):
         rca,action=_co_analysis(i,course,result,target);co_rca.append(rca);ws.cell(8+i,8,action)
-    ws["A18"]="Outcome analysis: "+" ".join(co_rca)
+    ws["A20"]="Outcome analysis: "+" ".join(co_rca)
     ws["A15"] = course.faculty
 
     ws = _sheet(wb, "11. PO ATTAINMENT")
@@ -372,18 +442,25 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
     attainment_headers = _label_cells(ws, outcome_labels)
     for p,label in enumerate(outcome_labels):
         target=po_targets["current"][p]
-        for header in attainment_headers.get(label,[]):
-            if header.row not in (8,21): continue
-            value=result["direct_po"][p] if header.row==8 else result["overall_po"][p]; value_row=15 if header.row==8 else 28
-            ws.cell(value_row,header.column,value); ws.cell(value_row+1,header.column,target if value>0 and target is not None else "NA"); ws.cell(value_row+2,header.column,"YES" if value>0 and target is not None and value>=target else ("NO" if value>0 and target is not None else "NA"))
+        header=next((x for x in attainment_headers.get(label,[]) if x.row==8),None)
+        if not header: continue
+        for value,value_row in ((result["direct_po"][p],15),(result["overall_po"][p],28)):
+            mapped=value>0 and target is not None
+            ws.cell(value_row,header.column,value if mapped else None)
+            ws.cell(value_row+1,header.column,target if mapped else None)
+            ws.cell(value_row+2,header.column,("Y" if value>=target else "N") if mapped else "NA")
 
     ws = _sheet(wb, "12. ACTION PLAN & RCA-PO")
     po_rca=[]
+    action_labels=_label_cells(ws,outcome_labels)
     for i,(label,value,target) in enumerate(zip(outcome_labels,result["overall_po"],po_targets["current"])):
         contributors=[f"CO{c+1}" for c in range(len(course.cos)) if mapping[c][i]>0]
-        rca,action=_po_analysis(label,value,target,contributors);po_rca.append(rca);ws.cell(8+i,8,action)
-    ws["A15"]=course.faculty
-    ws["A18"]="Outcome analysis: "+" ".join(po_rca)
+        rca,action=_po_analysis(label,value,target,contributors);po_rca.append((label,rca))
+        row=next((cell.row for cell in action_labels.get(label,[]) if 9<=cell.row<=24),None)
+        if row: ws.cell(row,8,action)
+    ws["A26"]=course.faculty
+    ws["A32"]="Program Outcome (PO) – Root Cause Analysis\n\n"+" ".join(rca for label,rca in po_rca if label.startswith("PO"))
+    ws["A34"]="Program Specific Outcome (PSO) – Root Cause Analysis\n\n"+" ".join(rca for label,rca in po_rca if label.startswith("PSO"))
     wb.save(output)
 
 
@@ -402,9 +479,15 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
         students, ia_max, mid_max, see_max = parse_marks(files["marks"])
         warnings=[]
     else:
-        raw,ia_max,mid_max,see_max,warnings=normalize_assessments(files["qp_analysis"],files.get("ia_marks") or [],files["midsem_marks"],files["final_marks"],co_labels,json.loads(fields.get("manual_splits") or "[]"))
+        raw,ia_max,mid_max,see_max,warnings=normalize_assessments(files["qp_analysis"],files.get("ia_marks") or [],files["midsem_marks"],files["final_marks"],co_labels,json.loads(fields.get("manual_splits") or "[]"),fields.get("mapping_source",""))
         students=[Student(x["reg"],x["name"],x["ia"],x["mid"],x["see"]) for x in raw]
     warnings += apply_grades(files.get("grades"), students, course.code)
+    if files.get("grades"):
+        pending=[s.reg for s in students if not s.grade]
+        if pending:
+            warnings.append("Students without a confirmed final grade were excluded from attainment: "+", ".join(pending)+". Their cells remain pending, not zero.")
+            students=[s for s in students if s.grade]
+        if not students: raise ValueError("No students have a confirmed final grade; attainment cannot be calculated yet.")
     registrations=[s.reg for s in students]
     if len(registrations)!=len(set(registrations)): raise ValueError("Duplicate registration numbers were found in the marks file.")
     students.sort(key=lambda s: (0,int(s.reg)) if s.reg.isdigit() else (1,s.reg))
@@ -435,5 +518,5 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
     result=compute(students,ia_max,mid_max,see_max,survey,direct,overall,mapping,0)
     output_dir.mkdir(parents=True,exist_ok=True); label=course.code.replace(' ','_') or 'Course'; name=f"{uuid.uuid4().hex[:10]}_CO_PO_Attainment_{label}.xlsx"; output=output_dir/name
     fill_template(files["template"],output,course,students,(ia_max,mid_max,see_max),survey,result,mapping,co_targets,po_targets,direct,overall,co_labels,outcome_labels)
-    summary={"file":name,"students":len(students),"survey_responses":len(survey),"warnings":warnings,"cie":[round(x,3) for x in result["cie"]],"see":[round(x,3) for x in result["see"]],"direct":[round(x,3) for x in result["direct"]],"indirect":[round(x,3) for x in result["indirect"]] if survey else ["NA"]*4,"overall":[round(x,3) for x in result["overall"]],"po":[round(x,3) for x in result["overall_po"]],"targets":co_targets["current"],"co_status":["YES" if x>=co_targets["current"][i] else "NO" for i,x in enumerate(result["overall"])]}
+    summary={"file":name,"students":len(students),"survey_responses":len(survey),"warnings":warnings,"cie":[round(x,3) for x in result["cie"]],"see":[round(x,3) for x in result["see"]],"direct":[round(x,3) for x in result["direct"]],"indirect":[round(x,3) for x in result["indirect"]] if survey else ["NA"]*len(co_labels),"overall":[round(x,3) for x in result["overall"]],"po":[round(x,3) if x>0 else None for x in result["overall_po"]],"targets":co_targets["current"],"co_status":["Y" if x>=co_targets["current"][i] else "N" for i,x in enumerate(result["overall"])]}
     return output,summary

@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from engine import inspect_course_plan, inspect_template, run_job
-from assessment_import import parse_qp_analysis, preview_conflicts
+from assessment_import import parse_qp_analysis, preview_conflicts, mapping_conflict
 
 ROOT=Path(__file__).resolve().parent
 STATIC=ROOT/'static'
@@ -91,13 +91,22 @@ class Handler(SimpleHTTPRequestHandler):
                 if not qp: return self._json(400,{'error':'Upload the Question Paper Analysis first.'})
                 qp_path=temp/('qp_analysis'+Path(qp[0]).suffix.lower()); qp_path.write_bytes(qp[1]); assessments=parse_qp_analysis(qp_path)
                 conflicts=[]
+                mapping_conflicts=[]
+                mid=(form_files.get('midsem_marks') or [None])[0]
+                if mid:
+                    mid_path=temp/('midsem_marks'+Path(mid[0]).suffix.lower()); mid_path.write_bytes(mid[1])
+                    mid_map=next((a for a in assessments if a.kind=='mid'),None)
+                    if mid_map:
+                        co_labels=sorted({q.co for a in assessments for q in a.questions},key=lambda x:int(''.join(filter(str.isdigit,x)) or 0))
+                        item=mapping_conflict(mid_path,mid_map,co_labels)
+                        if item: mapping_conflicts.append(item)
                 final=(form_files.get('final_marks') or [None])[0]
                 if final:
                     final_path=temp/('final_marks'+Path(final[0]).suffix.lower()); final_path.write_bytes(final[1])
                     final_map=next((a for a in assessments if a.kind=='final'),None)
                     if final_map: conflicts.extend(preview_conflicts(final_path,final_map))
                 cos=sorted({q.co for a in assessments for q in a.questions},key=lambda x:int(''.join(filter(str.isdigit,x)) or 0))
-                return self._json(200,{'cos':cos,'assessments':[{'name':a.name,'kind':a.kind,'maximum':a.maximum,'questions':len(a.questions)} for a in assessments],'conflicts':conflicts})
+                return self._json(200,{'cos':cos,'assessments':[{'name':a.name,'kind':a.kind,'maximum':a.maximum,'questions':len(a.questions)} for a in assessments],'conflicts':conflicts,'mapping_conflicts':mapping_conflicts})
             files={}
             for key in ['template','marks','grades','survey','course_plan','qp_analysis','midsem_marks','final_marks']:
                 item=(form_files.get(key) or [None])[0]

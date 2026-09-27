@@ -1,14 +1,22 @@
 # CO–PO Attainment Automation
 
+The interface is branded as **OSP Academic Quality Automation**. Every upload card shows a red status light before file selection and a green status light after selection, with a responsive four-step workflow for upload, review, configuration and generation.
+
 CO, PO and PSO columns are detected dynamically from the uploaded official template; they are not fixed in the webpage.
+
+Outcome detection is restricted to the official target table so labels appearing elsewhere in formulas or unused sheets are not mistakenly added. CO slots without target data remain inactive until confirmed by the QP Analysis or course plan. Unmapped CO–PO/PSO cells are displayed as blank; blank is interpreted internally as mapping value zero.
 
 ## General assessment workflow
 
-The hosted application accepts a QP Analysis document, one combined IA workbook or multiple IA files, question-wise Midsem marks, question/subquestion-wise final marks, final grades, course-end survey and course plan. Student rows are matched and sorted by registration number, so source files may be in different orders. The number of internal assessments is read from the QP Analysis rather than fixed at four.
+The hosted application accepts a QP Analysis document, one combined IA workbook or multiple IA files, question-wise Midsem marks, question/subquestion-wise final marks, final grades, course-end survey and course plan. Student rows are matched and sorted by registration number, so source files may be in different orders. The number of internal assessments is read from the QP Analysis rather than fixed at four. Registration columns are recognized from common variants (`Registration Number`, `Reg No.`, `Reg. No`, `Enrollment ID`, `USN`, `Roll No`, `Student ID`) or inferred from student-number values when the heading is unconventional.
 
 If a marks column combines subparts mapped to different COs, the application displays a mandatory student-wise split table. Generation remains blocked until every split equals the original combined mark.
 
-CO and PO/PSO action plans are based on each outcome's actual attainment, target, gap, CO statement and Bloom's level. Outcomes that attain the target receive a continuation statement; only below-target outcomes receive corrective actions and RCA.
+When an examination export contains its own CO-wise totals, the application compares that mapping with the QP Analysis. If the maxima differ, the Assessment Review section shows both versions and requires the faculty to select the approved source before generation.
+
+For multi-sheet IA exports, the application selects the complete table matching the detected number of internal assessments. Missing raw marks remain pending unless a complete consolidated table is present.
+
+CO and PO/PSO action plans are based on each outcome's actual attainment, target, gap, CO statement and Bloom's level. Corrective-action cells are populated only for outcomes below target. Attained and unmapped outcomes remain blank in the action-plan column, while the RCA records the complete outcome analysis.
 
 RCA and action plans are written automatically by the application. Faculty do not need to type them. The RCA identifies the weakest available evidence source (CIE, SEE or course-end survey), while the action plan selects a suitable academic intervention and a measurable follow-up assessment.
 
@@ -23,12 +31,16 @@ A private local web application for completing the M.Tech theory CO–PO attainm
 
 ## Required uploads
 
-- Official unfilled M.Tech theory CO–PO template (`.xlsx`)
-- CO-wise marks analysis (`.xlsx`) with a `CO Summary` sheet
+- Official unfilled UG theory CO–PO template (`.xlsx`)
+- Either source assessment files or a prepared CO-wise marks workbook
 
-## Optional uploads
+## Source assessment uploads
 
-- Grade and CGPA export (`.xlsx`)
+- QP Analysis (`.docx`)
+- One combined IA workbook or any number of separate IA workbooks
+- Mid-semester question-wise marks
+- End-term question/subquestion-wise marks
+- Final-grade export (`.xlsx`)
 - Course-end survey export (`.xlsx`)
 - Course plan (`.docx`)
 
@@ -42,7 +54,7 @@ The `CO Summary` sheet must include:
 - Final-examination CO1–CO4
 - A `Maximum Marks` row
 
-The current `AIMI_CO_Wise_Marks_Analysis` format is supported directly.
+Students are matched and sorted by registration number. A student without a confirmed final grade remains pending and is excluded from attainment rather than being treated as zero.
 
 ## Calculations
 
