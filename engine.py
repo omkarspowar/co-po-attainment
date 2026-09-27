@@ -14,6 +14,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
 from xlsx_raw import first_nonempty_sheet, read_xlsx
+from assessment_import import normalize_assessments
 
 
 def text(value: Any) -> str:
@@ -139,20 +140,37 @@ def parse_course_plan(path: Path | None, fallback: Course) -> Course:
     patterns = {
         "code": r"Course\s*Code\s*[:|]\s*([A-Z]{2,}\s*\d{3,})",
         "name": r"Course\s*(?:Name|Title)\s*[:|]\s*([^\n|]+)",
+        "program": r"(?:Programme|Program)\s*(?:Name)?\s*[:|]\s*([^\n|]+)",
+        "semester": r"Semester\s*[:|]\s*([^\n|]+)",
+        "year": r"Academic\s*Year\s*[:|]\s*([^\n|]+)",
+        "school": r"(?:School|Department)\s*[:|]\s*([^\n|]+)",
+        "course_type": r"Course\s*Type\s*[:|]\s*([^\n|]+)",
     }
     for key, pattern in patterns.items():
         match = re.search(pattern, content, flags=re.I)
         if match and not getattr(fallback, key):
             setattr(fallback, key, match.group(1).strip())
+    if not fallback.name:
+        first_heading = next((p.text.strip() for p in doc.paragraphs if p.text.strip()), "")
+        if first_heading and len(first_heading) < 150: fallback.name = first_heading
     co_matches = re.findall(r"\bCO\s*([1-6])\s*[:.\-|]\s*([^\n|]+)", content, flags=re.I)
     for index, statement in co_matches:
         position = int(index) - 1
-        if position < 4 and len(statement.strip()) > 15:
+        if position < len(fallback.cos) and len(statement.strip()) > 15:
             fallback.cos[position] = statement.strip()
+    for co in range(1, len(fallback.cos)+1):
+        bloom_match = re.search(rf"\bCO\s*{co}\b[^\n|]*?\bL\s*([1-6])\b", content, flags=re.I)
+        if bloom_match: fallback.bloom[co-1] = f"L{bloom_match.group(1)}"
     return fallback
 
 
-def parse_survey(path: Path | None) -> list[dict[str, Any]]:
+def inspect_course_plan(path: Path) -> dict[str, Any]:
+    blank = Course(school="", program="", semester="", odd_even="", section="", course_type="", bloom=["", "", "", ""])
+    course = parse_course_plan(path, blank)
+    return {"course_code": course.code, "course_name": course.name, "school": course.school, "program": course.program, "semester": course.semester, "year": course.year, "course_type": course.course_type, "cos": course.cos, "bloom": course.bloom}
+
+
+def parse_survey(path: Path | None, co_count: int=4) -> list[dict[str, Any]]:
     if not path:
         return []
     rows = first_nonempty_sheet(path)
@@ -162,7 +180,7 @@ def parse_survey(path: Path | None) -> list[dict[str, Any]]:
     name_i = next((i for i, x in enumerate(header) if "student's full name" in x or "student full name" in x), 6)
     reg_i = next((i for i, x in enumerate(header) if "reg. no" in x or "registration" in x), 7)
     co_indices = []
-    for co in range(1, 5):
+    for co in range(1, co_count+1):
         pattern = re.compile(rf"\bco\s*{co}\b")
         co_indices.append(next((i for i, x in enumerate(header) if pattern.search(x)), 7 + co))
     responses = []
@@ -190,23 +208,24 @@ def weighted_level(levels: list[int]) -> float:
 
 
 def compute(students: list[Student], ia_max: list[float], mid_max: list[float], see_max: list[float], responses: list[dict[str, Any]], direct_weights: tuple[float, float], overall_weights: tuple[float, float], mapping: list[list[float]], target: float) -> dict[str, Any]:
-    cie_max = [ia_max[i] + mid_max[i] for i in range(4)]
-    cie_marks = [[s.ia[i] + s.mid[i] for i in range(4)] for s in students]
-    cie_levels = [[attainment(cie_marks[r][c], cie_max[c], students[r].grade) for c in range(4)] for r in range(len(students))]
-    see_levels = [[attainment(students[r].see[c], see_max[c], students[r].grade) for c in range(4)] for r in range(len(students))]
-    cie = [weighted_level([row[c] for row in cie_levels]) for c in range(4)]
-    see = [weighted_level([row[c] for row in see_levels]) for c in range(4)]
-    direct = [(cie[i] * direct_weights[0] + see[i] * direct_weights[1]) / 100 for i in range(4)]
+    n=len(ia_max)
+    cie_max = [ia_max[i] + mid_max[i] for i in range(n)]
+    cie_marks = [[s.ia[i] + s.mid[i] for i in range(n)] for s in students]
+    cie_levels = [[attainment(cie_marks[r][c], cie_max[c], students[r].grade) for c in range(n)] for r in range(len(students))]
+    see_levels = [[attainment(students[r].see[c], see_max[c], students[r].grade) for c in range(n)] for r in range(len(students))]
+    cie = [weighted_level([row[c] for row in cie_levels]) for c in range(n)]
+    see = [weighted_level([row[c] for row in see_levels]) for c in range(n)]
+    direct = [(cie[i] * direct_weights[0] + see[i] * direct_weights[1]) / 100 for i in range(n)]
     indirect = []
-    for c in range(4):
+    for c in range(n):
         levels = [3 if x["ratings"][c] == 5 else 2 if x["ratings"][c] >= 3 else 1 for x in responses]
         indirect.append(weighted_level(levels))
-    overall = [((direct[i] * overall_weights[0] + indirect[i] * overall_weights[1]) / 100) if responses else direct[i] for i in range(4)]
+    overall = [((direct[i] * overall_weights[0] + indirect[i] * overall_weights[1]) / 100) if responses else direct[i] for i in range(n)]
     def po(co_values: list[float]) -> list[float]:
         result = []
         for p in range(len(mapping[0]) if mapping else 0):
-            denominator = sum(mapping[c][p] for c in range(4))
-            result.append(sum(co_values[c] * mapping[c][p] for c in range(4)) / denominator if denominator else 0.0)
+            denominator = sum(mapping[c][p] for c in range(n))
+            result.append(sum(co_values[c] * mapping[c][p] for c in range(n)) / denominator if denominator else 0.0)
         return result
     return {"cie_max": cie_max, "cie_marks": cie_marks, "cie_levels": cie_levels, "see_levels": see_levels, "cie": cie, "see": see, "direct": direct, "indirect": indirect, "overall": overall, "direct_po": po(direct), "overall_po": po(overall), "target": target}
 
@@ -223,6 +242,34 @@ def _label_cells(ws, labels: list[str]) -> dict[str, list[Any]]:
             key = text(cell.value).upper().replace(" ", "")
             if key in result: result[key].append(cell)
     return result
+
+
+def _co_analysis(i: int, course: Course, result: dict[str, Any], target: float) -> tuple[str, str]:
+    label=f"CO{i+1}"; statement=course.cos[i] or label; bloom=course.bloom[i] or "the mapped cognitive level"
+    overall=result["overall"][i]; direct=result["direct"][i]; indirect=result["indirect"][i]
+    components={"continuous internal assessment":result["cie"][i],"semester-end examination":result["see"][i]}
+    if indirect>0: components["course-end survey"]=indirect
+    weak_name,weak_value=min(components.items(),key=lambda x:x[1])
+    if overall>=target:
+        rca=f"{label} attained the target ({overall:.2f} against {target:.2f}). The comparatively lowest evidence was from the {weak_name} ({weak_value:.2f}); this is a monitoring point rather than a current attainment failure."
+        action=f"Continue the teaching and assessment practices used for “{statement}”. Retain activities at {bloom}, review question-level performance in the {weak_name}, and monitor the same indicator in the next cycle to prevent regression."
+    else:
+        gap=target-overall
+        rca=f"{label} did not attain the target: overall attainment {overall:.2f}, target {target:.2f}, gap {gap:.2f}. The weakest evidence was the {weak_name} ({weak_value:.2f}); direct attainment was {direct:.2f}"+(f" and indirect attainment was {indirect:.2f}." if indirect>0 else ".")+f" This indicates insufficient achievement of “{statement}”, particularly at {bloom}."
+        if "survey" in weak_name: intervention="clarify the CO and its learning relevance, increase guided demonstrations and collect mid-course feedback"
+        elif "semester-end" in weak_name: intervention="conduct additional exam-oriented application/case-analysis practice, discuss model answers and use a pre-SEE formative test"
+        else: intervention="introduce short diagnostic quizzes, guided problem-solving/tutorial sessions and timely question-level feedback before the next internal assessment"
+        action=f"For {label}, {intervention}. Align the remedial activity and rubric explicitly with “{statement}” at {bloom}. Verify effectiveness through a documented reassessment and compare its attainment with the present {gap:.2f} gap in the next cycle."
+    return rca,action
+
+
+def _po_analysis(label: str, value: float, target: float | None, contributors: list[str]) -> tuple[str,str]:
+    source=", ".join(contributors) if contributors else "no mapped CO"
+    if value<=0 or target is None: return (f"{label} is not mapped to an active CO in this course; attainment analysis is not applicable.","No corrective action is required unless the CO–PO/PSO mapping is revised.")
+    if value>=target:
+        return (f"{label} attained the target ({value:.2f} against {target:.2f}) through contributions from {source}.",f"Continue the learning activities, assessment evidence and rubrics used for {source}; monitor {label} in the next cycle.")
+    gap=target-value
+    return (f"{label} did not attain the target: attainment {value:.2f}, target {target:.2f}, gap {gap:.2f}. The result is driven by the mapped outcomes {source}.",f"Strengthen the learning activities and assessment rubrics of {source}, include explicit evidence for {label}, and verify improvement in the next cycle against the present {gap:.2f} gap.")
 
 
 def fill_template(template: Path, output: Path, course: Course, students: list[Student], maxima: tuple[list[float], list[float], list[float]], survey: list[dict[str, Any]], result: dict[str, Any], mapping: list[list[float]], co_targets: dict[str,list[float]], po_targets: dict[str,list[float]], direct_weights: tuple[float, float], overall_weights: tuple[float, float], co_labels: list[str], outcome_labels: list[str]) -> None:
@@ -314,9 +361,11 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
         target=co_targets["current"][c]; col=4+c; ws.cell(14,col,result["cie"][c]); ws.cell(15,col,result["see"][c]); ws.cell(16,col,result["direct"][c]); ws.cell(19,col,result["direct"][c]); ws.cell(20,col,result["indirect"][c] if survey else "NA"); ws.cell(21,col,result["overall"][c]); ws.cell(22,col,target); ws.cell(23,col,"YES" if result["overall"][c]>=target else "NO")
 
     ws = _sheet(wb, "10. ACTION PLAN & RCA-CO")
-    actions=["Use healthcare-agent examples and short diagnostic quizzes.","Use guided cases on algorithm selection and heuristic problem solving.","Reinforce MLOps, data-integration and deployment-validation case studies.","Use ethics, safety, human-in-the-loop discussions and a capstone presentation rubric."]
-    for i in range(4): ws.cell(8+i,8,actions[i])
-    ws["A15"],ws["A18"] = course.faculty,"Review COs below target and retain successful assessment methods for attained COs."
+    co_rca=[]
+    for i,target in enumerate(co_targets["current"]):
+        rca,action=_co_analysis(i,course,result,target);co_rca.append(rca);ws.cell(8+i,8,action)
+    ws["A18"]="Outcome analysis: "+" ".join(co_rca)
+    ws["A15"] = course.faculty
 
     ws = _sheet(wb, "11. PO ATTAINMENT")
     for c in range(4): ws.cell(9+c,1,result["direct"][c]); ws.cell(22+c,1,result["overall"][c])
@@ -326,12 +375,15 @@ def fill_template(template: Path, output: Path, course: Course, students: list[S
         for header in attainment_headers.get(label,[]):
             if header.row not in (8,21): continue
             value=result["direct_po"][p] if header.row==8 else result["overall_po"][p]; value_row=15 if header.row==8 else 28
-            ws.cell(value_row,header.column,value); ws.cell(value_row+1,header.column,target if value>0 else "NA"); ws.cell(value_row+2,header.column,"YES" if value>=target and value>0 else "NA")
+            ws.cell(value_row,header.column,value); ws.cell(value_row+1,header.column,target if value>0 and target is not None else "NA"); ws.cell(value_row+2,header.column,"YES" if value>0 and target is not None and value>=target else ("NO" if value>0 and target is not None else "NA"))
 
     ws = _sheet(wb, "12. ACTION PLAN & RCA-PO")
-    po_actions=["Continue clinical case investigations, evidence-based justification and capstone validation.","Strengthen technical reporting and presentation using structured rubrics.","Deepen specialization through advanced AI, MLOps and ethics integration."]
-    for i in range(3): ws.cell(8+i,8,po_actions[i])
-    ws["A15"],ws["A18"] = course.faculty,"Review mapped POs below target and document the corrective action in the next delivery cycle."
+    po_rca=[]
+    for i,(label,value,target) in enumerate(zip(outcome_labels,result["overall_po"],po_targets["current"])):
+        contributors=[f"CO{c+1}" for c in range(len(course.cos)) if mapping[c][i]>0]
+        rca,action=_po_analysis(label,value,target,contributors);po_rca.append(rca);ws.cell(8+i,8,action)
+    ws["A15"]=course.faculty
+    ws["A18"]="Outcome analysis: "+" ".join(po_rca)
     wb.save(output)
 
 
@@ -339,31 +391,41 @@ def run_job(files: dict[str, Path | None], fields: dict[str, str], output_dir: P
     template_info=inspect_template(files["template"])
     co_labels=json.loads(fields.get("co_labels") or "null") or template_info["cos"][:4]
     outcome_labels=json.loads(fields.get("outcome_labels") or "null") or template_info["outcomes"]
-    if len(co_labels)!=4: raise ValueError("This marks format requires four active COs (CO1–CO4).")
+    if not co_labels: raise ValueError("At least one active CO is required.")
     if any(x not in template_info["cos"] for x in co_labels) or any(x not in template_info["outcomes"] for x in outcome_labels): raise ValueError("Outcome labels do not match the uploaded template. Please select the template again.")
-    course = Course(code=fields.get("course_code", ""), name=fields.get("course_name", ""), faculty=fields.get("faculty", ""), school=fields.get("school", "") or Course.school, program=fields.get("program", "") or Course.program, semester=fields.get("semester", "II"), year=fields.get("year", ""), odd_even=fields.get("odd_even", "Even"), section=fields.get("section", "Medical Informatics"), course_type=fields.get("course_type", "Core"))
+    course = Course(code=fields.get("course_code", ""), name=fields.get("course_name", ""), faculty=fields.get("faculty", ""), school=fields.get("school", ""), program=fields.get("program", ""), semester=fields.get("semester", ""), year=fields.get("year", ""), odd_even=fields.get("odd_even", ""), section=fields.get("section", ""), course_type=fields.get("course_type", ""), cos=[""]*len(co_labels), bloom=[""]*len(co_labels))
     course = parse_course_plan(files.get("course_plan"), course)
-    for i in range(4):
+    for i in range(len(co_labels)):
         if fields.get(f"co{i+1}"): course.cos[i]=fields[f"co{i+1}"]
-    students, ia_max, mid_max, see_max = parse_marks(files["marks"])
-    warnings = apply_grades(files.get("grades"), students, course.code)
+        if fields.get(f"bloom{i+1}"): course.bloom[i]=fields[f"bloom{i+1}"]
+    if files.get("marks"):
+        students, ia_max, mid_max, see_max = parse_marks(files["marks"])
+        warnings=[]
+    else:
+        raw,ia_max,mid_max,see_max,warnings=normalize_assessments(files["qp_analysis"],files.get("ia_marks") or [],files["midsem_marks"],files["final_marks"],co_labels,json.loads(fields.get("manual_splits") or "[]"))
+        students=[Student(x["reg"],x["name"],x["ia"],x["mid"],x["see"]) for x in raw]
+    warnings += apply_grades(files.get("grades"), students, course.code)
     registrations=[s.reg for s in students]
     if len(registrations)!=len(set(registrations)): raise ValueError("Duplicate registration numbers were found in the marks file.")
-    survey = parse_survey(files.get("survey"))
+    students.sort(key=lambda s: (0,int(s.reg)) if s.reg.isdigit() else (1,s.reg))
+    survey = parse_survey(files.get("survey"),len(co_labels))
     if survey and len(survey) < len(students): warnings.append(f"Survey response rate is {len(survey)} of {len(students)} students.")
     direct=(number(fields.get("cie_weight"),60),number(fields.get("see_weight"),40)); overall=(number(fields.get("direct_weight"),80),number(fields.get("indirect_weight"),20))
     if not math.isclose(sum(direct),100,abs_tol=0.01): raise ValueError("CIE and SEE weights must total 100%.")
     if not math.isclose(sum(overall),100,abs_tol=0.01): raise ValueError("Direct and indirect weights must total 100%.")
-    def targets(field: str, count: int, default: float) -> dict[str,list[float]]:
+    mapping=json.loads(fields.get("mapping",json.dumps(DEFAULT_MAPPING)))
+    if len(mapping)!=len(co_labels) or any(len(row)!=len(outcome_labels) for row in mapping) or any(number(v,-1)<0 or number(v,-1)>3 for row in mapping for v in row): raise ValueError(f"CO–PO/PSO mapping must be a {len(co_labels)} × {len(outcome_labels)} matrix with values from 0 to 3.")
+    def targets(field: str, count: int, default: float, allow_blank: bool=False) -> dict[str,list[float|None]]:
         raw=json.loads(fields.get(field) or "{}"); result={}
         for key in ("previous","attained","current"):
             values=raw.get(key,[default]*count)
-            if len(values)!=count or any(v is None or not 0<=number(v,-1)<=3 for v in values): raise ValueError(f"All {field.replace('_',' ')} values must be between 0 and 3.")
-            result[key]=[number(v) for v in values]
+            if len(values)!=count or any(v is not None and not 0<=number(v,-1)<=3 for v in values): raise ValueError(f"All entered {field.replace('_',' ')} values must be between 0 and 3.")
+            if not allow_blank and any(v is None for v in values): raise ValueError(f"Complete all {field.replace('_',' ')} values.")
+            result[key]=[None if v is None else number(v) for v in values]
         return result
-    co_targets=targets("co_targets",len(co_labels),2.4); po_targets=targets("po_targets",len(outcome_labels),2.0)
-    mapping=json.loads(fields.get("mapping",json.dumps(DEFAULT_MAPPING)))
-    if len(mapping)!=len(co_labels) or any(len(row)!=len(outcome_labels) for row in mapping) or any(number(v,-1)<0 or number(v,-1)>3 for row in mapping for v in row): raise ValueError(f"CO–PO/PSO mapping must be a {len(co_labels)} × {len(outcome_labels)} matrix with values from 0 to 3.")
+    co_targets=targets("co_targets",len(co_labels),2.4); po_targets=targets("po_targets",len(outcome_labels),2.0,True)
+    for p in range(len(outcome_labels)):
+        if any(mapping[c][p]>0 for c in range(len(co_labels))) and po_targets["current"][p] is None: raise ValueError(f"Enter the current target for mapped outcome {outcome_labels[p]}.")
     known=set(registrations)
     unmatched=[x["reg"] for x in survey if x["reg"] not in known]
     if unmatched: warnings.append("Survey registration numbers not found in marks: "+", ".join(unmatched))

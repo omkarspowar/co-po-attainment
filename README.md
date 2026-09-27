@@ -2,6 +2,16 @@
 
 CO, PO and PSO columns are detected dynamically from the uploaded official template; they are not fixed in the webpage.
 
+## General assessment workflow
+
+The hosted application accepts a QP Analysis document, one combined IA workbook or multiple IA files, question-wise Midsem marks, question/subquestion-wise final marks, final grades, course-end survey and course plan. Student rows are matched and sorted by registration number, so source files may be in different orders. The number of internal assessments is read from the QP Analysis rather than fixed at four.
+
+If a marks column combines subparts mapped to different COs, the application displays a mandatory student-wise split table. Generation remains blocked until every split equals the original combined mark.
+
+CO and PO/PSO action plans are based on each outcome's actual attainment, target, gap, CO statement and Bloom's level. Outcomes that attain the target receive a continuation statement; only below-target outcomes receive corrective actions and RCA.
+
+RCA and action plans are written automatically by the application. Faculty do not need to type them. The RCA identifies the weakest available evidence source (CIE, SEE or course-end survey), while the action plan selects a suitable academic intervention and a measurable follow-up assessment.
+
 A private local web application for completing the M.Tech theory CO–PO attainment template.
 
 ## Start on Windows

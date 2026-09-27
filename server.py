@@ -15,7 +15,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from engine import inspect_template, run_job
+from engine import inspect_course_plan, inspect_template, run_job
+from assessment_import import parse_qp_analysis, preview_conflicts
 
 ROOT=Path(__file__).resolve().parent
 STATIC=ROOT/'static'
@@ -60,7 +61,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not path.exists(): return self.send_error(404)
         data=path.read_bytes(); self.send_response(200); self.send_header('Content-Type',mimetypes.guess_type(path.name)[0] or 'application/octet-stream'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
     def do_POST(self):
-        if self.path not in {'/api/generate','/api/inspect-template'}: return self.send_error(404)
+        if self.path not in {'/api/generate','/api/inspect-template','/api/inspect-course-plan','/api/inspect-assessments'}: return self.send_error(404)
         length=int(self.headers.get('Content-Length','0'))
         if length>MAX_UPLOAD: return self._json(413,{'error':'Uploads exceed the 30 MB limit.'})
         temp=Path(tempfile.mkdtemp(prefix='co_po_'))
@@ -73,21 +74,43 @@ class Handler(SimpleHTTPRequestHandler):
             for part in message.iter_parts():
                 name=part.get_param('name',header='content-disposition'); filename=part.get_filename(); payload=part.get_payload(decode=True) or b''
                 if not name: continue
-                if filename: form_files[name]=(filename,payload)
+                if filename: form_files.setdefault(name,[]).append((filename,payload))
                 else: form_fields[name]=payload.decode(part.get_content_charset() or 'utf-8',errors='replace')
             if self.path=='/api/inspect-template':
-                item=form_files.get('template')
+                item=(form_files.get('template') or [None])[0]
                 if not item: return self._json(400,{'error':'Choose an Excel template first.'})
                 path=temp/('template'+Path(item[0]).suffix.lower()); path.write_bytes(item[1])
                 return self._json(200,inspect_template(path))
+            if self.path=='/api/inspect-course-plan':
+                item=(form_files.get('course_plan') or [None])[0]
+                if not item: return self._json(400,{'error':'Choose a Word course plan first.'})
+                path=temp/('course_plan'+Path(item[0]).suffix.lower()); path.write_bytes(item[1])
+                return self._json(200,inspect_course_plan(path))
+            if self.path=='/api/inspect-assessments':
+                qp=(form_files.get('qp_analysis') or [None])[0]
+                if not qp: return self._json(400,{'error':'Upload the Question Paper Analysis first.'})
+                qp_path=temp/('qp_analysis'+Path(qp[0]).suffix.lower()); qp_path.write_bytes(qp[1]); assessments=parse_qp_analysis(qp_path)
+                conflicts=[]
+                final=(form_files.get('final_marks') or [None])[0]
+                if final:
+                    final_path=temp/('final_marks'+Path(final[0]).suffix.lower()); final_path.write_bytes(final[1])
+                    final_map=next((a for a in assessments if a.kind=='final'),None)
+                    if final_map: conflicts.extend(preview_conflicts(final_path,final_map))
+                cos=sorted({q.co for a in assessments for q in a.questions},key=lambda x:int(''.join(filter(str.isdigit,x)) or 0))
+                return self._json(200,{'cos':cos,'assessments':[{'name':a.name,'kind':a.kind,'maximum':a.maximum,'questions':len(a.questions)} for a in assessments],'conflicts':conflicts})
             files={}
-            for key in ['template','marks','grades','survey','course_plan']:
-                item=form_files.get(key)
+            for key in ['template','marks','grades','survey','course_plan','qp_analysis','midsem_marks','final_marks']:
+                item=(form_files.get(key) or [None])[0]
                 if item:
                     suffix=Path(item[0]).suffix.lower(); path=temp/(key+suffix); path.write_bytes(item[1]); files[key]=path
                 else: files[key]=None
-            if not files['template'] or not files['marks']: return self._json(400,{'error':'Template and CO-wise marks files are required.'})
-            fields={key:form_fields.get(key,'') for key in ['course_code','course_name','faculty','school','program','semester','year','odd_even','section','course_type','cie_weight','see_weight','direct_weight','indirect_weight','mapping','co_targets','po_targets','co_labels','outcome_labels','co1','co2','co3','co4']}
+            ia_paths=[]
+            for i,item in enumerate(form_files.get('ia_marks') or []):
+                suffix=Path(item[0]).suffix.lower(); path=temp/f'ia_marks_{i+1}{suffix}'; path.write_bytes(item[1]); ia_paths.append(path)
+            files['ia_marks']=ia_paths
+            if not files['template']: return self._json(400,{'error':'The official CO–PO template is required.'})
+            if not files['marks'] and not (files['qp_analysis'] and ia_paths and files['midsem_marks'] and files['final_marks']): return self._json(400,{'error':'Upload either a prepared CO-wise marks workbook or the QP Analysis with IA, Midsem and final marks.'})
+            fields=dict(form_fields)
             output,summary=run_job(files,fields,JOBS)
             public_name=output.name.split('_',1)[1] if '_' in output.name else output.name; token=uuid.uuid4().hex
             with DOWNLOAD_LOCK: DOWNLOADS[token]={'path':output,'name':public_name,'expires':time.time()+DOWNLOAD_TTL}

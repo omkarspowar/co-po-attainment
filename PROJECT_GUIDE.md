@@ -4,6 +4,21 @@
 
 The website reads the uploaded official Excel template before displaying attainment settings. CO, PO and PSO labels are detected from the workbook, and the target and mapping tables are rebuilt automatically. The interface is therefore not limited to PO1–PO6: a UG template containing PO1–PO12 and PSO labels will display those outcomes, while an M.Tech template containing PO1–PO6 will display six POs.
 
+## Course-plan extraction
+
+All course-specific webpage fields start blank. When a Word course plan is uploaded, the website extracts any available course details, CO statements and Bloom's levels and places them in editable fields. Faculty can correct or complete the fields, and those manual values take priority when the workbook is generated.
+
+## Separate assessment imports
+
+- QP Analysis supplies assessment names, maximum marks, question-to-CO mappings and Bloom's levels.
+- IA marks may be supplied in one combined workbook or as multiple files; the assessment count is not fixed.
+- Midsem and final-exam marks are imported separately.
+- Final grades and survey responses are joined by registration number, never by row position.
+- Duplicate registrations, unmatched records, invalid marks and inconsistent manual splits are reported before generation.
+- A prepared CO-wise marks workbook remains available as an optional fallback.
+
+When an aggregate question contains subparts belonging to different COs, faculty must complete the on-screen manual split. The split is accepted only when its sum equals the student's original aggregate mark and each subpart stays within its maximum.
+
 Developed by **Omkar S. Powar**  
 Assistant Professor, School of Electrical Engineering, MIT, Manipal
 
